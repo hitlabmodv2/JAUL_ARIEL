@@ -1,0 +1,20 @@
+{
+    "autoReadStatus": false,
+    "autoLikeStatus": false,
+    "downloadMediaStatus": false,
+    "sensorNomor": true,
+    "antiTelpon": false,
+    "autoKickStory": false,
+    "autoLikeDelay": {
+        "enabled": true,
+        "type": "random",
+        "minDelay": 1,
+        "maxDelay": 10,
+        "fixedDelay": 3
+    },
+    "blackList": [
+        "628987654321",
+        "628123456789"
+    ],
+    "whiteList": []
+}
