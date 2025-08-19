@@ -1,0 +1,29 @@
+{
+    "autoReadStatus": true,
+    "sensorNomor": true,
+    "autoOnline": true,
+    "autoLikeDelay": {
+        "enabled": true,
+        "type": "random",
+        "minDelay": 1,
+        "maxDelay": 15,
+        "fixedDelay": 3
+    },
+    "autoTyping": {
+        "enabled": false,
+        "duration": 10000,
+        "includeGroups": true,
+        "includePrivate": true
+    },
+    "autoRecord": {
+        "enabled": false,
+        "duration": 10000,
+        "includeGroups": true,
+        "includePrivate": true
+    },
+    "readReceipt": {
+        "enabled": true,
+        "privateChatsOnly": true,
+        "logReadReceipt": false
+    }
+}
