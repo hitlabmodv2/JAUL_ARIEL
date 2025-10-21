@@ -16,7 +16,7 @@
   "license": "ISC",
   "description": "Auto Read Story/Status WhatsApp adalah bot sederhana yang memungkinkan kamu untuk melihat status/story teman-teman WhatsApp secara otomatis, sehingga kamu menjadi orang pertama yang melihat story mereka.",
   "dependencies": {
-    "@whiskeysockets/baileys": "github:jauhariel/Baileys",
+    "@whiskeysockets/baileys": "npm:@whiskeysockets/baileys@latest",
     "colors": "^1.4.0",
     "moment-timezone": "^0.5.47",
     "pino": "^9.9.0",

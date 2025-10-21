@@ -1,0 +1,10 @@
+node_modules/
+sessions/
+sessionsQR/
+*.log
+.env
+.DS_Store
+JAUL_ARIEL_no_node_modules.zip
+package-lock.json
+.vscode/
+.idea/

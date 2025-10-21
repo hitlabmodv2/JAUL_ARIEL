@@ -164,6 +164,10 @@ const startPasswordMonitor = () => {
 
 let useCode = true;
 let loggedInNumber;
+let isPromptActive = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+let lastQr = null;
 
 function logCuy(message, type = "green") {
   moment.locale("id");
@@ -385,6 +389,74 @@ function showLoginOptions() {
   console.log(colorUtils.qrBorder('╚' + '═'.repeat(50) + '╝'));
 }
 
+/**
+ * Try requesting a pairing code with simple retry + backoff.
+ * Some environments may close the underlying connection briefly, causing
+ * `Connection Closed`. Retry a few times before failing so the user sees
+ * the pairing code when possible.
+ */
+async function requestPairingCodeWithRetry(sock, waNumber, opts = {}) {
+  const retries = opts.retries ?? 3;
+  const baseDelayMs = opts.baseDelayMs ?? 2000;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      if (!sock || typeof sock.requestPairingCode !== 'function') {
+        throw new Error('Socket belum siap atau API tidak tersedia');
+      }
+      const code = await sock.requestPairingCode(waNumber);
+      return code;
+    } catch (err) {
+      const msg = err?.message || String(err);
+      if (attempt >= retries) {
+        // Rethrow final error so caller can handle/display it
+        throw err;
+      }
+      const delay = Math.min(baseDelayMs * 2 ** (attempt - 1), 60000);
+      console.log(colorUtils.warningBg(`${colorUtils.emojis.wifi} GAGAL MEMINTA PAIRING (percobaan ${attempt}/${retries})`));
+      console.log(colorUtils.warning(`Reason: ${msg}. Retry dalam ${Math.round(delay / 1000)}s...`));
+      await new Promise((res) => setTimeout(res, delay));
+    }
+  }
+}
+
+/**
+ * Wait for the socket to emit a connection.update where connection is not 'close'.
+ * This increases the chance that requestPairingCode will succeed instead of
+ * immediately failing with 'Connection Closed'.
+ */
+function waitForSocketReady(sock, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    let resolved = false;
+    const timeout = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        reject(new Error('Timeout waiting for socket ready'));
+      }
+    }, timeoutMs);
+
+    try {
+      const handler = (update) => {
+        const connection = update?.connection;
+        // If connection is 'open' or 'connecting' consider it ready enough
+        if (connection && connection !== 'close') {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            sock.ev.off('connection.update', handler);
+            resolve();
+          }
+        }
+      };
+
+      sock.ev.on('connection.update', handler);
+    } catch (err) {
+      clearTimeout(timeout);
+      reject(err);
+    }
+  });
+}
+
 async function connectToWhatsApp() {
   const sessionPath = path.join(__dirname, "sessions");
   const sessionValid = validateSession();
@@ -403,75 +475,117 @@ async function connectToWhatsApp() {
     generateHighQualityLinkPreview: true,
   });
 
-  // Jika session tidak valid, tampilkan pilihan login
+  // Jika session tidak valid, tampilkan pilihan login satu kali saja
   if (!sessionValid) {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
+    // Jika sudah ada prompt aktif, jangan tampilkan lagi
+    if (!isPromptActive) {
+      await new Promise((resolve) => {
+        isPromptActive = true;
+        const rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
 
-    showLoginOptions();
+        showLoginOptions();
 
-    const askLoginMethod = () => {
-      rl.question(
-        colorUtils.pairingMsg(`\n${colorUtils.emojis.arrow} Pilihan Anda: `),
-        async (choice) => {
-          if (choice === "1") {
-            // Pairing Code
-            useCode = true;
-            console.log(colorUtils.pairingTitle(`${colorUtils.emojis.pairing} PAIRING CODE LOGIN ${colorUtils.emojis.pairing}`));
-            console.log(colorUtils.pairingMsg("Mode Pairing Code dipilih! " + colorUtils.emojis.check));
+        const askLoginMethod = () => {
+          rl.question(
+            colorUtils.pairingMsg(`\n${colorUtils.emojis.arrow} Pilihan Anda: `),
+            async (choice) => {
+              if (choice === "1") {
+                // Pairing Code
+                useCode = true;
+                console.log(colorUtils.pairingTitle(`${colorUtils.emojis.pairing} PAIRING CODE LOGIN ${colorUtils.emojis.pairing}`));
+                console.log(colorUtils.pairingMsg("Mode Pairing Code dipilih! " + colorUtils.emojis.check));
 
-            tutorials.pairingNumberTutorial();
+                tutorials.pairingNumberTutorial();
 
-            const askWaNumber = () => {
-              rl.question(
-                colorUtils.pairingMsg(`\n${colorUtils.emojis.phone} Masukkan nomor WhatsApp: `),
-                async (waNumber) => {
-                  if (!/^\d+$/.test(waNumber)) {
-                    console.log(colorUtils.errorBg(`${colorUtils.emojis.cross} ERROR`));
-                    console.log(colorUtils.error("Nomor harus berupa angka! Contoh: 628123456789"));
-                    askWaNumber();
-                  } else if (!waNumber.startsWith("62")) {
-                    console.log(colorUtils.errorBg(`${colorUtils.emojis.cross} ERROR`));
-                    console.log(colorUtils.error("Nomor harus diawali dengan 62! Contoh: 628123456789"));
-                    askWaNumber();
-                  } else {
-                    try {
-                      console.log(colorUtils.infoBg(`${colorUtils.emojis.wifi} MEMINTA KODE PAIRING...`));
-                      const code = await sock.requestPairingCode(waNumber);
+                const askWaNumber = () => {
+                  rl.question(
+                    colorUtils.pairingMsg(`\n${colorUtils.emojis.phone} Masukkan nomor WhatsApp: `),
+                    async (waNumber) => {
+                      if (!/^\d+$/.test(waNumber)) {
+                        console.log(colorUtils.errorBg(`${colorUtils.emojis.cross} ERROR`));
+                        console.log(colorUtils.error("Nomor harus berupa angka! Contoh: 628123456789"));
+                        askWaNumber();
+                      } else if (!waNumber.startsWith("62")) {
+                        console.log(colorUtils.errorBg(`${colorUtils.emojis.cross} ERROR`));
+                        console.log(colorUtils.error("Nomor harus diawali dengan 62! Contoh: 628123456789"));
+                        askWaNumber();
+                      } else {
+                          try {
+                            console.log(colorUtils.infoBg(`${colorUtils.emojis.wifi} MENUNGGU KONEKSI SEBELUM MEMINTA KODE PAIRING...`));
+                            try {
+                              await waitForSocketReady(sock, 10000);
+                            } catch (e) {
+                              console.log(colorUtils.warning('Timeout menunggu socket siap, akan mencoba tetap meminta kode pairing...'));
+                            }
+                            console.log(colorUtils.infoBg(`${colorUtils.emojis.wifi} MEMINTA KODE PAIRING...`));
+                            const code = await requestPairingCodeWithRetry(sock, waNumber, { retries: 5, baseDelayMs: 2000 });
 
-                      console.log('\n' + colorUtils.pairingCodeDisplay(`KODE PAIRING: ${code}`));
-                      console.log(colorUtils.pairingMsg(`${colorUtils.emojis.key} Masukkan kode ini ke WhatsApp Anda!`));
+                            console.log('\n' + colorUtils.pairingCodeDisplay(`KODE PAIRING: ${code}`));
+                            console.log(colorUtils.pairingMsg(`${colorUtils.emojis.key} Masukkan kode ini ke WhatsApp Anda!`));
 
-                      tutorials.pairingCodeTutorial();
-                      rl.close();
-                    } catch (error) {
-                      console.log(colorUtils.errorBg(`${colorUtils.emojis.cross} ERROR`));
-                      console.log(colorUtils.error(`Gagal mendapatkan kode pairing: ${error.message}`));
-                      askWaNumber();
+                            tutorials.pairingCodeTutorial();
+                            rl.close();
+                            isPromptActive = false;
+                            resolve();
+                          } catch (error) {
+                            console.log(colorUtils.errorBg(`${colorUtils.emojis.cross} ERROR`));
+                            console.log(colorUtils.error(`Gagal mendapatkan kode pairing: ${error.message || error}`));
+                            // Jika gagal, tanyakan lagi apakah mau mencoba ulang atau kembali ke menu
+                            console.log(colorUtils.info('Silakan coba lagi atau tekan Ctrl+C untuk keluar.'));
+                            askWaNumber();
+                          }
+                      }
+                    }
+                  );
+                };
+                askWaNumber();
+              } else if (choice === "2") {
+                // QR Code
+                useCode = false;
+                console.log(colorUtils.qrTitle(`${colorUtils.emojis.qr} QR CODE LOGIN ${colorUtils.emojis.qr}`));
+                console.log(colorUtils.qrMsg("Mode QR Code dipilih! " + colorUtils.emojis.check));
+                // Inform user they can reprint QR if it didn't display
+                console.log(colorUtils.info('Jika QR tidak muncul, ketik "r" lalu Enter untuk menampilkan ulang QR yang terakhir diterima'));
+
+                // Setup listener for reprint command
+                rl.on('line', (input) => {
+                  const cmd = input.trim().toLowerCase();
+                  if (cmd === 'r') {
+                    if (lastQr) {
+                      console.log(colorUtils.info('Mencetak ulang QR yang terakhir diterima...'));
+                      qrcode.generate(lastQr, { small: true });
+                    } else {
+                      console.log(colorUtils.warning('Belum ada QR yang diterima. Tunggu beberapa detik lalu coba lagi.'));
                     }
                   }
-                }
-              );
-            };
-            askWaNumber();
-          } else if (choice === "2") {
-            // QR Code
-            useCode = false;
-            console.log(colorUtils.qrTitle(`${colorUtils.emojis.qr} QR CODE LOGIN ${colorUtils.emojis.qr}`));
-            console.log(colorUtils.qrMsg("Mode QR Code dipilih! " + colorUtils.emojis.check));
-            rl.close();
-          } else {
-            console.log(colorUtils.errorBg(`${colorUtils.emojis.cross} PILIHAN TIDAK VALID`));
-            console.log(colorUtils.error('Silakan pilih 1 untuk Pairing Code atau 2 untuk QR Code'));
-            askLoginMethod();
-          }
-        }
-      );
-    };
+                });
 
-    askLoginMethod();
+                // If we already have a QR (emitted earlier), print it immediately to speed up login
+                if (lastQr) {
+                  console.log(colorUtils.info('QR ditemukan sebelumnya, menampilkannya sekarang...'));
+                  qrcode.generate(lastQr, { small: true });
+                } else {
+                  console.log(colorUtils.info('Menunggu QR dari server...'));
+                }
+                isPromptActive = false;
+                resolve();
+              } else {
+                console.log(colorUtils.errorBg(`${colorUtils.emojis.cross} PILIHAN TIDAK VALID`));
+                console.log(colorUtils.error('Silakan pilih 1 untuk Pairing Code atau 2 untuk QR Code'));
+                askLoginMethod();
+              }
+            }
+          );
+        };
+
+        askLoginMethod();
+      });
+    } else {
+      console.log(colorUtils.info('Login prompt sudah aktif, menunggu input...'));
+    }
   }
 
   // Handle QR Code display dengan cara baru
@@ -480,6 +594,8 @@ async function connectToWhatsApp() {
 
     // Handle QR Code
     if (qr && !useCode) {
+      // Save last QR so user can request a manual reprint if needed
+      lastQr = qr;
       console.log('\n' + colorUtils.qrTitle(`${colorUtils.emojis.qr} QR CODE SIAP DIPINDAI ${colorUtils.emojis.qr}`));
       console.log(colorUtils.qrBorder('╔' + '═'.repeat(50) + '╗'));
       console.log(colorUtils.qrBorder('║') + colorUtils.qrMsg(' 📷 Scan QR Code di bawah ini: ') + '                   ' + colorUtils.qrBorder('║'));
@@ -500,18 +616,31 @@ async function connectToWhatsApp() {
       const shouldReconnect =
         lastDisconnect.error?.output.statusCode !== DisconnectReason.loggedOut;
       if (shouldReconnect) {
+        reconnectAttempts++;
+        if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+          console.log(colorUtils.errorBg(`${colorUtils.emojis.cross} GAGAL TERHUBUNG`));
+          console.log(colorUtils.error(`Mencapai batas percobaan reconnect (${MAX_RECONNECT_ATTEMPTS}). Hentikan percobaan untuk menghindari spam.`));
+          return;
+        }
+
+        const delay = Math.min(5000 * 2 ** (reconnectAttempts - 1), 60000);
         console.log(colorUtils.warningBg(`${colorUtils.emojis.wifi} RECONNECTING...`));
-        console.log(colorUtils.warning("Mencoba menghubungkan kembali ke WhatsApp..."));
-        connectToWhatsApp();
+        console.log(colorUtils.warning(`Mencoba menghubungkan kembali ke WhatsApp dalam ${Math.round(delay / 1000)} detik... (percobaan ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`));
+        setTimeout(() => {
+          connectToWhatsApp();
+        }, delay);
       } else {
         console.log(colorUtils.errorBg(`${colorUtils.emojis.cross} LOGGED OUT`));
         console.log(colorUtils.error("Anda telah logout dari WhatsApp. Menghapus session..."));
         fs.rmSync(sessionPath, { recursive: true, force: true });
-        connectToWhatsApp();
+        console.log(colorUtils.info('Session dihapus. Silakan jalankan ulang bot untuk login kembali.'));
+        process.exit(0);
       }
     } else if (connection === "open") {
       console.log(colorUtils.successBg(`${colorUtils.emojis.check} BERHASIL TERHUBUNG ${colorUtils.emojis.heart}`));
       loggedInNumber = sock.user.id.split("@")[0].split(":")[0];
+      // Reset reconnect attempts setelah berhasil membuka koneksi
+      reconnectAttempts = 0;
       let displayedLoggedInNumber = loggedInNumber;
       if (sensorNomor) {
         displayedLoggedInNumber =
@@ -551,7 +680,7 @@ SC : https://github.com/jauhariel/AutoReadStoryWhatsapp`;
           welcomeMessage = true;
         }, 5000);
       }
-    }
+    } 
   });
 
   sock.ev.on("creds.update", saveCreds);
