@@ -1,0 +1,14 @@
+version: '3.8'
+services:
+  bot:
+    build: .
+    container_name: jaul_ariel_bot
+    restart: unless-stopped
+    volumes:
+      - ./sessions:/usr/src/app/sessions
+    environment:
+      - TZ=Asia/Jakarta
+      # Example: set GITHUB_TOKEN only if you need to run push script inside container
+      # - GITHUB_TOKEN=${GITHUB_TOKEN}
+    tty: true
+    stdin_open: true
