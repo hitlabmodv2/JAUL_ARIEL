@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: jaul-ariel-bot
+    env: docker
+    dockerfilePath: Dockerfile
+    plan: standard
+    disk: 10 # GB, adjust according to needs; ensures sessions persistence
+    instanceCount: 1
+    autoDeploy: true
+    buildCommand: ""
+    startCommand: ""
